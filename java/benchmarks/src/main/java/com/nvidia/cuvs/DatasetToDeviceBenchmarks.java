@@ -23,13 +23,9 @@ import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
-import java.nio.FloatBuffer;
-import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.util.EnumSet;
 import java.util.Random;
 import java.util.Set;
 
@@ -49,6 +45,8 @@ public class DatasetToDeviceBenchmarks {
 
   private float[][] data;
 
+  private Path preloadedVectorDataFile;
+
   private CuVSResources resources;
 
   private float[][] createRandomData() {
@@ -66,12 +64,18 @@ public class DatasetToDeviceBenchmarks {
   public void initialize() throws Throwable {
     data = createRandomData();
     resources = CuVSResources.create();
+    // Serialize to tmp file
+    preloadedVectorDataFile = Files.createTempFile("vec_", "_preloaded");
+    writeToFile(preloadedVectorDataFile);
   }
 
   @TearDown
-  public void cleanUp() {
+  public void cleanUp() throws IOException {
     if (resources != null) {
       resources.close();
+    }
+    if (preloadedVectorDataFile != null) {
+      Files.deleteIfExists(preloadedVectorDataFile);
     }
   }
 
@@ -80,9 +84,7 @@ public class DatasetToDeviceBenchmarks {
       var buffer = ByteBuffer.allocate(dims * Float.BYTES);
       for (int i = 0; i < data.length; ++i) {
         buffer.asFloatBuffer().put(data[i]);
-        //buffer.flip();
         output.write(buffer.array());
-        //buffer.clear();
       }
     }
   }
@@ -103,6 +105,8 @@ public class DatasetToDeviceBenchmarks {
       // transfer host to device
       hostMatrix.toDevice(resources).close();
     }
+
+    Files.deleteIfExists(vectorDataFile);
   }
 
   @Benchmark
@@ -126,6 +130,9 @@ public class DatasetToDeviceBenchmarks {
         hostMatrix.toDevice(resources).close();
       }
     }
+
+    Files.deleteIfExists(vectorDataFile);
+    Files.deleteIfExists(tmpVectorDataFile);
   }
 
   @Benchmark
@@ -142,10 +149,12 @@ public class DatasetToDeviceBenchmarks {
     }
     CuVSDeviceMatrix matrix = builder.build();
     matrix.close();
+
+    Files.deleteIfExists(vectorDataFile);
   }
 
   @Benchmark
-  public void heapToHostToDevice(Blackhole bh) throws IOException {
+  public void transferHeapToHostToDevice(Blackhole bh) throws IOException {
     // transfer heap to host matrix
     var builder = CuVSMatrix.hostBuilder(size, dims, CuVSMatrix.DataType.FLOAT);
     for (int i = 0; i < size; ++i) {
@@ -159,7 +168,7 @@ public class DatasetToDeviceBenchmarks {
   }
 
   @Benchmark
-  public void tmpFileMMapToDevice(Blackhole bh) throws IOException {
+  public void transferTmpFileMMapToDevice(Blackhole bh) throws IOException {
     // Serialize to tmp file
     var tmpVectorDataFile = Files.createTempFile("vec_", "");
     writeToFile(tmpVectorDataFile);
@@ -175,10 +184,27 @@ public class DatasetToDeviceBenchmarks {
         hostMatrix.toDevice(resources).close();
       }
     }
+
+    Files.deleteIfExists(tmpVectorDataFile);
   }
 
   @Benchmark
-  public void heapToDevice(Blackhole bh) throws IOException {
+  public void transferPreloadedMMapFileToDevice(Blackhole bh) throws IOException {
+    // Map the tmp file to memory
+    try (var fc = FileChannel.open(preloadedVectorDataFile, Set.of(READ));
+         Arena arena = Arena.ofConfined()) {
+
+      MemorySegment mapped = fc.map(FileChannel.MapMode.READ_ONLY, 0L, size * dims * Float.BYTES, arena);
+
+      try (var hostMatrix = DatasetHelper.fromMemorySegment(mapped, size, dims, CuVSMatrix.DataType.FLOAT)) {
+        // transfer memory-mapped file to device
+        hostMatrix.toDevice(resources).close();
+      }
+    }
+  }
+
+  @Benchmark
+  public void transferHeapToDevice(Blackhole bh) throws IOException {
     // Direct heap -> device
     var builder = CuVSMatrix.deviceBuilder(resources, size, dims, CuVSMatrix.DataType.FLOAT);
     for (int i = 0; i < size; ++i) {
