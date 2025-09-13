@@ -16,9 +16,11 @@
 package com.nvidia.cuvs.spi;
 
 import static com.nvidia.cuvs.internal.common.Util.*;
+import static com.nvidia.cuvs.internal.panama.headers_h_1.cudaStreamSynchronize;
 
 import com.nvidia.cuvs.*;
 import com.nvidia.cuvs.internal.*;
+import com.nvidia.cuvs.internal.common.PinnedMemoryBuffer;
 import com.nvidia.cuvs.internal.common.Util;
 import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
@@ -171,7 +173,8 @@ final class JDKProvider implements CuVSProvider {
   public CuVSMatrix.Builder<CuVSDeviceMatrix> newDeviceMatrixBuilder(
       CuVSResources resources, long size, long columns, CuVSMatrix.DataType dataType)
       throws UnsupportedOperationException {
-    return new HeapSegmentBuilder(resources, size, columns, dataType);
+    // return new HeapSegmentBuilder(resources, size, columns, dataType);
+    return new BufferedSegmentBuilder(resources, size, columns, dataType);
   }
 
   @Override
@@ -230,6 +233,102 @@ final class JDKProvider implements CuVSProvider {
     var dataset = new CuVSHostMatrixArenaImpl(size, columns, CuVSMatrix.DataType.BYTE);
     Util.copy(dataset.memorySegment(), vectors);
     return dataset;
+  }
+
+  private static class BufferedSegmentBuilder implements CuVSMatrix.Builder<CuVSDeviceMatrix> {
+
+    private final long columns;
+    private final long size;
+    private final CuVSDeviceMatrixImpl matrix;
+    private final MemorySegment stream;
+
+    private final long rowBytes;
+    private int currentRow;
+
+    private final PinnedMemoryBuffer hostBuffer;
+    private final long bufferRowCount;
+    private int currentBufferRow;
+
+    private BufferedSegmentBuilder(
+        CuVSResources resources, long size, long columns, CuVSMatrix.DataType dataType) {
+      this.columns = columns;
+      this.size = size;
+      this.matrix = CuVSDeviceMatrixRMMImpl.create(resources, size, columns, dataType);
+      this.stream = Util.getStream(resources);
+      this.currentRow = 0;
+
+      this.hostBuffer = new PinnedMemoryBuffer(size, columns, matrix.valueLayout());
+
+      this.rowBytes = columns * matrix.valueLayout().byteSize();
+      this.bufferRowCount = Math.min((hostBuffer.size() / rowBytes), size);
+      this.currentBufferRow = 0;
+    }
+
+    @Override
+    public void addVector(float[] vector) {
+      if (vector.length != columns) {
+        throw new IllegalArgumentException(
+            String.format(
+                Locale.ROOT, "Expected a vector of size [%d], got [%d]", columns, vector.length));
+      }
+      internalAddVector(MemorySegment.ofArray(vector));
+    }
+
+    @Override
+    public void addVector(byte[] vector) {
+      if (vector.length != columns) {
+        throw new IllegalArgumentException(
+            String.format(
+                Locale.ROOT, "Expected a vector of size [%d], got [%d]", columns, vector.length));
+      }
+      internalAddVector(MemorySegment.ofArray(vector));
+    }
+
+    @Override
+    public void addVector(int[] vector) {
+      if (vector.length != columns) {
+        throw new IllegalArgumentException(
+            String.format(
+                Locale.ROOT, "Expected a vector of size [%d], got [%d]", columns, vector.length));
+      }
+      internalAddVector(MemorySegment.ofArray(vector));
+    }
+
+    @Override
+    public CuVSDeviceMatrix build() {
+      flushBuffer();
+      hostBuffer.close();
+      return matrix;
+    }
+
+    private void internalAddVector(MemorySegment vector) {
+      if (currentRow >= size) {
+        throw new ArrayIndexOutOfBoundsException();
+      }
+      var hostBufferOffset = currentBufferRow * rowBytes;
+      MemorySegment.copy(vector, 0, hostBuffer.address(), hostBufferOffset, rowBytes);
+
+      currentRow++;
+      currentBufferRow++;
+      if (currentBufferRow == bufferRowCount) {
+        flushBuffer();
+      }
+    }
+
+    private void flushBuffer() {
+      if (currentBufferRow > 0) {
+        var deviceMemoryOffset = (currentRow - currentBufferRow) * rowBytes;
+        var dst = matrix.memorySegment().asSlice(deviceMemoryOffset);
+        cudaMemcpyAsync(
+            dst,
+            hostBuffer.address(),
+            currentBufferRow * rowBytes,
+            CudaMemcpyKind.HOST_TO_DEVICE,
+            stream);
+        currentBufferRow = 0;
+        checkCudaError(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
+      }
+    }
   }
 
   /**

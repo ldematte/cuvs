@@ -91,7 +91,12 @@ public class CuVSDeviceMatrixImpl extends CuVSMatrixBaseImpl implements CuVSDevi
 
       MemorySegment bufferTensor =
           prepareTensor(
-              localArena, hostBuffer.address(), new long[] {rowCount, columns}, code(), bits(), kDLCPU());
+              localArena,
+              hostBuffer.address(),
+              new long[] {rowCount, columns},
+              code(),
+              bits(),
+              kDLCPU());
 
       try (var resourceAccess = resources.access()) {
         checkCuVSError(
