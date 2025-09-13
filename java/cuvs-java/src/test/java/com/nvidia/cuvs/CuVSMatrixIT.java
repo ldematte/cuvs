@@ -262,7 +262,7 @@ public class CuVSMatrixIT extends CuVSTestCase {
     }
   }
 
-  private void testFloatDatasetBuilder(int rows, int cols, CuVSMatrix.Builder builder) {
+  private void testFloatDatasetBuilder(int rows, int cols, CuVSMatrix.Builder<?> builder) {
 
     float[][] data = new float[rows][cols];
     for (int r = 0; r < rows; ++r) {
@@ -306,7 +306,7 @@ public class CuVSMatrixIT extends CuVSTestCase {
     }
   }
 
-  private void testIntDatasetBuilder(int rows, int cols, CuVSMatrix.Builder builder) {
+  private void testIntDatasetBuilder(int rows, int cols, CuVSMatrix.Builder<?> builder) {
 
     var data = new int[rows][cols];
     for (int r = 0; r < rows; ++r) {
@@ -349,7 +349,7 @@ public class CuVSMatrixIT extends CuVSTestCase {
     }
   }
 
-  private void testByteDatasetBuilder(int rows, int cols, CuVSMatrix.Builder builder) {
+  private void testByteDatasetBuilder(int rows, int cols, CuVSMatrix.Builder<?> builder) {
 
     var data = new byte[rows][cols];
     for (int r = 0; r < rows; ++r) {
@@ -408,7 +408,7 @@ public class CuVSMatrixIT extends CuVSTestCase {
         builder.addVector(array);
       }
 
-      try (var deviceMatrix = (CuVSDeviceMatrix) builder.build();
+      try (var deviceMatrix = builder.build();
           var hostMatrix = deviceMatrix.toHost()) {
 
         assertEquals(data.length, deviceMatrix.size());
@@ -423,7 +423,10 @@ public class CuVSMatrixIT extends CuVSTestCase {
 
         for (int n = 0; n < hostMatrix.size(); ++n) {
           for (int i = 0; i < hostMatrix.columns(); ++i) {
-            assertEquals(data[n][i], roundTripData[n][i], 1e-9);
+            var diff = Math.abs(data[n][i] - roundTripData[n][i]);
+            if (diff > 1e-9) {
+              throw new AssertionError("Data different at " + n + "," + i);
+            }
           }
         }
       }
